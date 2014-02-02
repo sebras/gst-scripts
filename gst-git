@@ -1,0 +1,65 @@
+#!/bin/bash -i
+#
+# Copyright (c) 2014, Sebastian Rasmussen <sebras@hotmail.com>
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+# REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+# FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+# INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+# LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+# OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+# PERFORMANCE OF THIS SOFTWARE.
+
+if [ $# -eq 1 -a "$1" = "magic" ]; then
+  cd $GST_UNINSTALLED_ROOT
+  exec $SHELL
+fi
+
+EXITCODE=0
+
+function atexit()
+{
+  if [ -d $TMPDIR ]; then
+    rm -rf $TMPDIR
+  fi
+  exit $EXITCODE
+}
+
+trap atexit INT
+trap atexit QUIT
+trap atexit STOP
+trap atexit EXIT
+
+TMPDIR=$(mktemp --tmpdir --directory gstreamer.XXX)
+OURDIR=$(dirname $(readlink -f $0))
+
+CURDATE=$(date +'%s')
+
+SCRIPTDATE=0
+if [ -e $OURDIR/gst-uninstalled ]; then
+SCRIPTDATE=$(date --reference $OURDIR/gst-uninstalled +'%s')
+fi
+
+if [ $(($CURDATE - $SCRIPTDATE)) -ge $((7 * 24 * 3600)) ]; then
+  echo "Automagically updating gst-uninstalled script..."
+  if [ -e $OURDIR/gst-uninstalled ]; then
+    mv -f $OURDIR/gst-uninstalled $OURDIR/gst-uninstalled.old
+  fi
+  wget --quiet -O $OURDIR/gst-uninstalled http://cgit.freedesktop.org/gstreamer/gstreamer/plain/scripts/gst-uninstalled
+  if [ $? -ne 0 ]; then
+    echo "Failed to automagically update gst-uninstalled script" > /dev/stderr
+    rm -f $OUTDIR/gst-uninstalled
+    if [ ! -e $OURDIR/gst-uninstalled.old ]; then
+      exit 1
+    fi
+    mv -f $OURDIR/gst-uninstalled.old $OURDIR/gst-uninstalled
+    echo "Reverting to old version of gst-uninstalled script" > /dev/stderr
+  fi
+  chmod 755 $OURDIR/gst-uninstalled
+fi
+
+SHELL=/bin/bash GSTPS1='[gst-git]' MYGST=$HOME/src/gst GST_UNINSTALLED_ROOT=$HOME/src/gst $OURDIR/gst-uninstalled $0 magic
