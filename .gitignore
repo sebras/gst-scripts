@@ -1,1 +1,13 @@
+glib
+gobject-introspection
+gst-plugins-bad
+gst-plugins-base
+gst-plugins-good
+gst-plugins-ugly
+gst-python
+gstreamer
+gst-rtsp-server
 gst-uninstalled
+gtk-doc
+tags
+.tags

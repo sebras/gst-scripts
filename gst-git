@@ -62,4 +62,4 @@ if [ $(($CURDATE - $SCRIPTDATE)) -ge $((7 * 24 * 3600)) ]; then
   chmod 755 $OURDIR/gst-uninstalled
 fi
 
-SHELL=/bin/bash GSTPS1='[gst-git]' MYGST=$HOME/src/gst GST_UNINSTALLED_ROOT=$HOME/src/gst $OURDIR/gst-uninstalled $0 magic
+SHELL=/bin/bash GSTPS1='[gst-git]' MYGST=$HOME/src/gst GST_UNINSTALLED_ROOT=$MYGST PKG_CONFIG_PATH=$MYGST/py-gobject:$MYGST/prefix/share/pkgconfig:$PKG_CONFIG_PATH $OURDIR/gst-uninstalled $0 magic

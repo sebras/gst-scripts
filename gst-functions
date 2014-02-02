@@ -1,0 +1,558 @@
+#!/bin/bash -i
+#
+# Copyright (c) 2014, Sebastian Rasmussen <sebras@hotmail.com>
+#
+# Permission to use, copy, modify, and/or distribute this software for any
+# purpose with or without fee is hereby granted, provided that the above
+# copyright notice and this permission notice appear in all copies.
+#
+# THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+# REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+# FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+# INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+# LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+# OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+# PERFORMANCE OF THIS SOFTWARE.
+
+COUNT=0
+EXITCODE=0
+
+GTK_DOC_URL=git://git.gnome.org/gtk-doc
+GTK_DOC_PATTERN='^GTK_DOC_[_0-9]*$'
+
+GLIB_URL=git://git.gnome.org/glib
+GLIB_PATTERN='^[0-9\.]*$'
+
+GOBJECT_INTROSPECTION_URL=git://git.gnome.org/gobject-introspection
+GOBJECT_INTROSPECTION_PATTERN='^GOBJECT_INTROSPECTION_[_0-9]*$'
+
+GSTREAMER_PACKAGES="gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad"
+GSTREAMER_PACKAGES="$GSTREAMER_PACKAGES gst-rtsp-server gst-python gst-plugins-ugly"
+
+GSTREAMER_URL=git://anongit.freedesktop.org/gstreamer
+
+GSTREAMER_COMMON_URL=$GSTREAMER_URL/common
+
+DEPENDENCY_PACKAGES="gtk-doc glib gobject-introspection py-gobject"
+
+PACKAGES="$DEPENDENCY_PACKAGES $GSTREAMER_PACKAGES"
+
+function atexit()
+{
+  while [ $COUNT -gt 0 ]; do
+    popd 1> /dev/null 2> /dev/null
+    COUNT=$((COUNT - 1))
+  done
+  exit $EXITCODE
+}
+
+trap atexit INT
+trap atexit KILL
+trap atexit STOP
+trap atexit EXIT
+
+if [ -z $MYGST ]; then
+    fail "run gst-git"
+fi
+
+if [ -n "$http_proxy" ]; then
+  mkdir -p $MYGST/.cache
+fi
+
+function push()
+{
+  pushd "$1" 1> /dev/null 2> /dev/null
+  COUNT=$(($COUNT + 1))
+}
+
+function pop()
+{
+  popd 1> /dev/null 2> /dev/null
+  COUNT=$((COUNT - 1))
+}
+
+function fail()
+{
+  echo "$1" > /dev/stderr
+  EXITCODE=1
+  exit $EXITCODE
+}
+
+function debug()
+{
+  if [ -n "$DEBUG" ]; then
+    echo "$1"
+  fi
+}
+
+function log()
+{
+  echo "$1"
+}
+
+function fetch_cache()
+{
+  local PACKAGE="$1"
+
+  if [ ! -d $MYGST/.cache/$PACKAGE.git ]; then
+    fail "$PACKAGE: has not been cloned"
+  fi
+
+  debug "$PACKAGE: fetching origin remote into cache"
+  push $MYGST/.cache/$PACKAGE.git
+  git fetch --quiet --all --prune
+  if [ $? -ne 0 ]; then
+    fail "$PACKAGE: fetching origin remote into cache failed"
+  fi
+  pop
+}
+
+function ensure_cache()
+{
+  local PACKAGE="$1"
+  local URL="$2"
+
+  if [ ! -d $MYGST/.cache/$PACKAGE.git ]; then
+    debug "$PACKAGE: cloning origin into cache"
+    git clone $URL $MYGST/.cache/$PACKAGE.git
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: cloning into cache failed"
+    fi
+  else
+    fetch_cache "$PACKAGE"
+  fi
+}
+
+function latest_tag()
+{
+  local PATTERN="$1"
+
+  (for TAG in $(git tag -l | grep "$PATTERN"); do
+      DATE=$(git show $TAG | head -3 | grep Date: | sed -e 's/Date:   //' -e 's/ \([0-9]\{4\}\) \([-+][0-9]\{4\}\)$/ UTC\2 \1/' -e 's/ \([0-9]\) /  \1 /g')
+      EPOCH=$(date --date="$DATE" +'%s')
+      echo -e "$EPOCH\t$TAG"
+  done) | sort -n | tail -1 | cut -f2
+}
+
+function clone()
+{
+  local PACKAGE="$1"
+  local URL="$2"
+  local PATTERN="$3"
+
+  if [ -d $MYGST/$PACKAGE ]; then
+    return
+  fi
+
+  log "$PACKAGE: cloning"
+
+  if [ -d $MYGST/.cache ]; then
+    ensure_cache "$PACKAGE" "$URL"
+    debug "$PACKAGE: cloning from cache"
+    git clone --quiet $MYGST/.cache/$PACKAGE.git $MYGST/$PACKAGE
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: cloning from cache failed"
+    fi
+  else
+    debug "$PACKAGE: cloning from origin"
+    git clone $URL $MYGST/$PACKAGE
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: cloning from origin failed"
+    fi
+  fi
+
+  push $MYGST/$PACKAGE
+
+  if [ -d $MYGST/.cache ]; then
+    debug "$PACKAGE: renaming origin remote to cache"
+    git remote rename origin cache
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: renaming origin remote to cache failed"
+    fi
+
+    debug "$PACKAGE: adding origin remote"
+    git remote add origin $URL
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: adding origin remote failed"
+    fi
+
+    debug "$PACKAGE: fetching origin remote"
+    git fetch --quiet --all --prune
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: fetching origin remote failed"
+    fi
+
+    debug "$PACKAGE: checking out cache detached HEAD"
+    git checkout --quiet $(git show HEAD | head -1 | cut -d' ' -f2)
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: checkout out cache detached HEAD failed"
+    fi
+
+    debug "$PACKAGE: removing cache master branch"
+    git branch --quiet -D master
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: removing cache master branch failed"
+    fi
+
+    debug "$PACKAGE: creating master branch tracking origin"
+    git branch --quiet --track master origin/master
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: creating master branch tracking origin failed"
+    fi
+  fi
+
+  if [ -d $MYGST/$PACKAGE/common ]; then
+    find $MYGST/$PACKAGE/common -type f | grep -q '^.*$'
+    if [ $? -eq 1 ]; then
+      rmdir $MYGST/$PACKAGE/common
+    fi
+  fi
+
+  git submodule summary 2> /dev/null | grep -q '^\* common'
+  if [ $? -eq 0 ]; then
+    SHA1=$(git submodule summary 2> /dev/null | grep '^\* common' | sed -e 's/^\* common \([^\.]*\)\..*$/\1/')
+
+    debug "$PACKAGE: needs common"
+
+    if [ -d $MYGST/.cache ]; then
+      ensure_cache common $GSTREAMER_COMMON_URL
+
+      debug "$PACKAGE/common: cloning from cache"
+      git clone --quiet $MYGST/.cache/common.git $MYGST/$PACKAGE/common
+      if [ $? -ne 0 ]; then
+        fail "$PACKAGE/common: cloning from cache failed"
+      fi
+    else
+      debug "$PACKAGE/common: cloning from origin"
+      git clone $GSTREAMER_COMMON_URL $MYGST/$PACKAGE/common
+      if [ $? -ne 0 ]; then
+        fail "$PACKAGE/common: cloning from origin failed"
+      fi
+    fi
+
+    push $MYGST/$PACKAGE/common
+
+    if [ -d $MYGST/.cache ]; then
+      debug "$PACKAGE/common: renaming origin remote to cache"
+      git remote rename origin cache
+      if [ $? -ne 0 ]; then
+        fail "$PACKAGE/common: renaming origin remote to cache failed"
+      fi
+
+      debug "$PACKAGE/common: adding origin remote"
+      git remote add origin $GSTREAMER_COMMON_URL
+      if [ $? -ne 0 ]; then
+        fail "$PACKAGE/common: adding origin remote failed"
+      fi
+
+      debug "$PACKAGE/common: fetching origin remote"
+      git fetch --quiet --all --prune
+      if [ $? -ne 0 ]; then
+        fail "$PACKAGE/common: fetching origin remote failed"
+      fi
+    fi
+
+    debug "$PACKAGE/common: checking out desired commit"
+    git checkout --quiet $SHA1
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE/common: checking out desired commit failed"
+    fi
+
+    pop
+  fi
+
+  if [ -n "$PATTERN" ]; then
+    TAG=$(latest_tag "$PATTERN")
+    debug "$PACKAGE: checking out latest tag $TAG"
+    git checkout --quiet $TAG
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: checking out latest tag $TAG failed"
+    fi
+  else
+    debug "$PACKAGE: checking out origin master branch"
+    git checkout --quiet master
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: checking out origin master branch failed"
+    fi
+  fi
+
+  pop
+}
+
+function fetch()
+{
+  local PACKAGE="$1"
+  local PATTERN="$2"
+
+  if [ ! -d $MYGST/$PACKAGE/.git ]; then
+    fail "$PACKAGE: has not been cloned yet"
+  fi
+
+  if [ -d $MYGST/.cache ]; then
+    fetch_cache "$PACKAGE"
+  fi
+
+  push $MYGST/$PACKAGE
+
+  debug "$PACKAGE: fetching new changes"
+  COLUMNS=$(($COLUMNS - 2 - ${#PACKAGE})) git fetch --all --prune | sed -e "s/^/$PACKAGE: /"
+  if [ $? -ne 0 ]; then
+    fail "$PACKAGE: fetching new changes failed"
+  fi
+
+  pop
+}
+
+function pull()
+{
+  local PACKAGE="$1"
+  local PATTERN="$2"
+
+  if [ ! -d $MYGST/$PACKAGE/.git ]; then
+    fail "$PACKAGE: has not been cloned yet"
+  fi
+
+  push $MYGST/$PACKAGE
+
+  debug "$PACKAGE: checking for uncommitted changes"
+  git diff --quiet
+  UNADDED=$?
+  git diff --quiet --cached
+  UNCOMMITTED=$?
+  if [ $UNADDED -ne 0 -o $UNCOMMITTED -ne 0 ]; then
+    if [ $UNADDED -ne 0 ]; then
+      echo "Changes that are not added:" > /dev/stderr
+      git diff --stat | cat > /dev/stderr
+    fi
+    if [ $UNCOMMITTED -ne 0 ]; then
+      echo "Changes that are not committed:" > /dev/stderr
+      git diff --cached --stat | cat > /dev/stderr
+    fi
+    fail "$PACKAGE: unable to pull because of uncommitted changes"
+  fi
+
+  if [ -d $MYGST/.cache ]; then
+    fetch_cache "$PACKAGE"
+  fi
+
+  debug "$PACKAGE: fetching new changes"
+  git fetch --quiet --all --prune
+  if [ $? -ne 0 ]; then
+    fail "$PACKAGE: fetching new changes failed"
+  fi
+
+  if [ -n "$PATTERN" ]; then
+    TAG=$(latest_tag "$PATTERN")
+    debug "$PACKAGE: checking out latest tag $TAG"
+    git checkout --quiet $TAG
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: checking out latest tag $TAG failed"
+    fi
+  else
+    debug "$PACKAGE: checking out origin master branch"
+    git checkout --quiet master
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: checking out origin master branch failed"
+    fi
+
+    debug "$PACKAGE: pulling master branch from origin"
+    COLUMNS=$(($COLUMNS - 2 - ${#PACKAGE})) git pull --ff-only | sed -e "s/^/$PACKAGE: /"
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: pulling master branch from origin failed"
+    fi
+
+    debug "$PACKAGE: updating submodules"
+    git submodule update --quiet --init
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: updating submodules failed"
+    fi
+  fi
+
+  pop
+}
+
+function autogen()
+{
+  local PACKAGE="$1"
+  shift
+  local ARGS="$@"
+
+  if [ ! -d $MYGST/$PACKAGE/.git ]; then
+    fail "$PACKAGE: has not been cloned yet"
+  fi
+
+  push $MYGST/$PACKAGE
+
+  debug "$PACKAGE: running autogen"
+  NOCONFIGURE=true ./autogen.sh
+  if [ $? -ne 0 ]; then
+    fail "$PACKAGE: running autogen failed"
+  fi
+
+  ./configure --help | grep -q -- '--enable-gcov'
+  if [ $? -eq 0 ]; then
+    ARGS="$ARGS --enable-gcov"
+  fi
+  if [ -d $MYGST/gtk-doc/.git ]; then
+    ./configure --help | grep -q -- '--enable-gtk-doc'
+    if [ $? -eq 0 ]; then
+      ARGS="$ARGS --enable-gtk-doc"
+    fi
+    ./configure --help | grep -q -- '--enable-gtk-doc-html'
+    if [ $? -eq 0 ]; then
+      ARGS="$ARGS --enable-gtk-doc-html"
+    fi
+  fi
+
+  debug "$PACKAGE: running configure"
+  ./configure --prefix=$MYGST/prefix $ARGS
+  if [ $? -ne 0 ]; then
+    fail "$PACKAGE: running configure failed"
+  fi
+
+  pop
+}
+
+function build()
+{
+  local PACKAGE="$1"
+
+  if [ ! -d $MYGST/$PACKAGE/.git -a "$PACKAGE" = "gtk-doc" ]; then
+    log "$PACKAGE: ignoring"
+    return
+  fi
+
+  if [ ! -d $MYGST/$PACKAGE/.git ]; then
+    fail "$PACKAGE: has not been cloned yet"
+  fi
+
+  push $MYGST/$PACKAGE
+
+  if [ ! -e $MYGST/$PACKAGE/Makefile ]; then
+    debug "$PACKAGE: configure is missing, running autogen"
+    autogen $PACKAGE
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: running autogen failed"
+    fi
+  else
+    debug "$PACKAGE: no need to run autogen, configure exists already"
+  fi
+
+  debug "$PACKAGE: running make"
+  make -j10
+  if [ $? -ne 0 ]; then
+    fail "$PACKAGE: running make failed"
+  fi
+
+  echo "$DEPENDENCY_PACKAGES" | grep -q $PACKAGE
+  if [ $? -eq 0 ]; then
+    debug "$PACKAGE: running make install"
+    make -j10 install
+    if [ $? -ne 0 ]; then
+      fail "$PACKAGE: running make install failed"
+    fi
+  fi
+
+  pop
+}
+
+function xref()
+{
+  local DIRS=
+
+  while [ $# -gt 0 ]; do
+    DIR="$1"
+    if [ -d $MYGST/$DIR ]; then
+      DIRS="$DIRS $DIR"
+    fi
+    shift 1
+  done
+
+  rm -f $MYGST/tags
+  ctags $(find $DIRS -name '*.[ch]'; find $DIRS -name '*.m4'; find $DIRS -name '*.ac')
+  if [ ! -e $MYGST/tags ]; then
+    fail "taggning source files failed"
+  fi
+
+  cat $MYGST/tags | sed -e 's/^\([^	]*	\)\(g.*\)$/\1..\/\2/' > $MYGST/.tags
+
+  for PACKAGE in $PACKAGES; do
+    cp $MYGST/.tags $PACKAGE/tags
+  done
+}
+
+function clean()
+{
+  local PACKAGE="$1"
+
+  if [ ! -d $MYGST/$PACKAGE/.git ]; then
+    fail "$PACKAGE: has not been cloned yet"
+  fi
+
+  if [ ! -e $MYGST/$PACKAGE/Makefile ]; then
+    debug "$PACKAGE: autogen has not run yet"
+    return
+  fi
+
+  push $MYGST/$PACKAGE
+
+  debug "$PACKAGE: cleaning"
+  make -j10 clean
+  if [ $? -ne 0 ]; then
+    fail "$PACKAGE: cleaning failed"
+  fi
+
+  pop
+}
+
+function distclean()
+{
+  local PACKAGE="$1"
+
+  if [ ! -d $MYGST/$PACKAGE/.git ]; then
+    fail "$PACKAGE: has not been cloned yet"
+  fi
+
+  if [ ! -e $MYGST/$PACKAGE/Makefile ]; then
+    fail "$PACKAGE: configure has not run yet"
+  fi
+
+  rm -f $MYGST/tags $MYGST/.tags
+
+  push $MYGST/$PACKAGE
+
+  debug "$PACKAGE: distcleaning"
+  make -j10 distclean
+  if [ $? -ne 0 ]; then
+    fail "$PACKAGE: distcleaning failed"
+  fi
+
+  rm -f $MYGST/$PACKAGE/configure
+
+  pop
+}
+
+function scrub()
+{
+  local PACKAGE="$1"
+
+  if [ ! -d $MYGST/$PACKAGE/.git ]; then
+    fail "$PACKAGE: has not been cloned yet"
+  fi
+
+  push $MYGST/$PACKAGE
+
+  debug "$PACKAGE: removing uncommitted changes"
+  git reset --quiet --hard HEAD
+  if [ $? -ne 0 ]; then
+    fail "$PACKAGE: removing uncommitted changes failed"
+  fi
+
+  debug "$PACKAGE: removing ignored and untracked files"
+  rm -rf $(git status --ignored | grep '^	' | tr -d '#' | grep -v '^\/')
+  if [ $? -ne 0 ]; then
+    fail "$PACKAGE: removing ignored and untracked files failed"
+  fi
+
+  pop
+}
